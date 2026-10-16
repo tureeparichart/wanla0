@@ -6,7 +6,8 @@ import {
   LeaveType,
   LeaveStatus,
   LeaveQuota,
-  ThaiHoliday
+  ThaiHoliday,
+  Role
 } from '../types/leave';
 import { 
   INITIAL_PERSONNEL, 
@@ -855,6 +856,92 @@ const parseJsonResponseSafe = async (res: Response): Promise<{ isJson: boolean; 
   }
 };
 
+// Parse LeaveRecord array from Web App JSON response (tables.LeaveRequests.data)
+export const parseLeaveRecordsFromWebApp = (tableData: any[], personnelList: Personnel[]): LeaveRecord[] => {
+  if (!Array.isArray(tableData) || tableData.length === 0) return [];
+  const pMapByName = new Map<string, Personnel>();
+  for (const p of personnelList) {
+    pMapByName.set(`${p.prefix}${p.firstName} ${p.lastName}`.trim(), p);
+    pMapByName.set(`${p.firstName} ${p.lastName}`.trim(), p);
+  }
+
+  return tableData.map((row: any, idx: number) => {
+    const id = String(row['ID'] || `sheet-req-${idx}`);
+    const referenceNumber = String(row['เลขที่คำขอ'] || `ลร.${String(idx + 1).padStart(2, '0')}/2570`).trim();
+    const personnelName = String(row['ชื่อ-นามสกุลผู้ขอลา'] || row['ชื่อ-นามสกุล'] || '').trim();
+    const p = pMapByName.get(personnelName) || personnelList.find(item => personnelName.includes(item.firstName)) || personnelList[0];
+    const leaveTypeLabel = String(row['ประเภทการลา'] || 'ลาป่วย');
+    
+    let leaveType: LeaveType = 'sick';
+    if (leaveTypeLabel.includes('กิจ') || leaveTypeLabel.includes('พักผ่อน')) leaveType = 'personal';
+    else if (leaveTypeLabel.includes('คลอด')) leaveType = 'maternity';
+    else if (leaveTypeLabel.includes('ช่วยภริยา') || leaveTypeLabel.includes('ภริยา')) leaveType = 'wife_delivery';
+    else if (leaveTypeLabel.includes('ทหาร')) leaveType = 'military';
+    else if (leaveTypeLabel.includes('อุปสมบท')) leaveType = 'ordination';
+    else if (leaveTypeLabel.includes('อื่น') || leaveTypeLabel.includes('อบรม')) leaveType = 'other';
+
+    const startDate = String(row['วันที่เริ่ม'] || '').slice(0, 10);
+    const endDate = String(row['วันที่สิ้นสุด'] || startDate).slice(0, 10);
+    const totalDays = Number(row['จำนวนวันทำการ'] || row['จำนวนวัน'] || 1);
+    const statusLabel = String(row['สถานะ'] || 'รอความเห็นหัวหน้าวิชาการ');
+
+    let status: LeaveStatus = 'pending_academic';
+    if (statusLabel.includes('อนุมัติแล้ว')) status = 'approved';
+    else if (statusLabel.includes('ไม่อนุมัติ')) status = 'rejected';
+    else if (statusLabel.includes('ยกเลิก')) status = 'cancelled';
+    else if (statusLabel.includes('รอ ผอ') || statusLabel.includes('เสนอ ผอ')) status = 'pending_director';
+
+    const isHalfDay = row['ลาครึ่งวัน'] === 'ใช่' || totalDays === 0.5;
+    const halfDayPeriod = row['ช่วงเวลาครึ่งวัน'] === 'ช่วงบ่าย' ? 'afternoon' : 'morning';
+
+    return {
+      id,
+      referenceNumber,
+      personnelId: row['รหัสบุคลากร'] || p.id,
+      leaveType,
+      fiscalYear: Number(row['ปีงบประมาณ']) || 2570,
+      startDate,
+      endDate,
+      isHalfDay,
+      halfDayPeriod: isHalfDay ? halfDayPeriod : undefined,
+      totalDays,
+      reason: row['เหตุผลการลา'] || row['เหตุผล'] || '',
+      contactAddress: row['ที่อยู่ระหว่างลา'] || row['ที่อยู่'] || '',
+      contactPhone: row['เบอร์โทรติดต่อ'] || row['เบอร์ติดต่อ'] || '',
+      substitutePersonnelId: row['ผู้ปฏิบัติหน้าที่แทน'],
+      submittedAt: row['วันที่ยื่น'] || new Date().toISOString(),
+      applicantSignature: p.signatureUrl || createDefaultSignatureSvg(personnelName || 'ผู้ขอลา'),
+      academicHeadComment: row['ความเห็นวิชาการ'] || undefined,
+      academicHeadActionDate: row['วันที่วิชาการลงความเห็น'] || undefined,
+      directorComment: row['คำสั่งผู้อำนวยการ'] || undefined,
+      directorActionDate: row['วันที่ผู้อำนวยการสั่งการ'] || undefined,
+      status,
+      cancellationReason: row['เหตุผลยกเลิก'] || undefined
+    };
+  });
+};
+
+// Parse Personnel array from Web App JSON response (tables.Personnel.data)
+export const parsePersonnelFromWebApp = (tableData: any[]): Personnel[] => {
+  if (!Array.isArray(tableData) || tableData.length === 0) return [];
+  return tableData.map((row: any) => ({
+    id: String(row['ID'] || `p-${Date.now()}`),
+    prefix: String(row['คำนำหน้า'] || 'นาย'),
+    firstName: String(row['ชื่อ'] || ''),
+    lastName: String(row['นามสกุล'] || ''),
+    position: String(row['ตำแหน่ง'] || 'ครู'),
+    academicStanding: String(row['วิทยฐานะ'] || ''),
+    department: String(row['กลุ่มสาระ'] || ''),
+    address: String(row['ที่อยู่'] || ''),
+    phone: String(row['เบอร์โทร'] || ''),
+    email: String(row['อีเมล'] || ''),
+    role: (row['บทบาท (Role)'] || row['บทบาท'] || 'teacher') as Role,
+    hireDate: String(row['วันที่บรรจุ'] || ''),
+    gender: (row['เพศ'] || 'male') as 'male' | 'female',
+    signatureUrl: createDefaultSignatureSvg(`${row['คำนำหน้า'] || ''}${row['ชื่อ'] || ''} ${row['นามสกุล'] || ''}`.trim())
+  }));
+};
+
 // Fetch unified leave records from Google Sheets (cross-device source of truth)
 export const fetchRecordsFromGoogleSheets = async (
   sheetId: string,
@@ -862,127 +949,164 @@ export const fetchRecordsFromGoogleSheets = async (
 ): Promise<LeaveRecord[] | null> => {
   if (!sheetId || !sheetId.trim()) return null;
 
-  try {
-    const encodedSheet = encodeURIComponent('สถิติการลา');
-    const url = `https://docs.google.com/spreadsheets/d/${sheetId.trim()}/gviz/tq?tqx=out:json&sheet=${encodedSheet}&tq=${encodeURIComponent('select *')}`;
-    
-    const res = await fetch(url);
-    if (!res.ok) return null;
+  const sheetsToTry = ['LeaveRequests', 'สถิติการลา'];
 
-    const text = await res.text();
-    const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);/);
-    if (!match) return null;
-
-    const json = JSON.parse(match[1]);
-    const rows = json?.table?.rows;
-    if (!Array.isArray(rows) || rows.length === 0) return [];
-
-    const pMapByName = new Map<string, Personnel>();
-    for (const p of personnelList) {
-      pMapByName.set(`${p.prefix}${p.firstName} ${p.lastName}`.trim(), p);
-      pMapByName.set(`${p.firstName} ${p.lastName}`.trim(), p);
-    }
-
-    const records: LeaveRecord[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const c = rows[i]?.c;
-      if (!c || !c[0]?.v) continue;
-
-      const referenceNumber = String(c[0]?.v).trim();
-      const submittedAt = c[1]?.v ? String(c[1]?.v) : new Date().toISOString();
-      const personnelName = c[2]?.v ? String(c[2]?.v).trim() : '';
-      const leaveTypeLabel = c[4]?.v ? String(c[4]?.v).trim() : 'ลาป่วย';
+  for (const sheetName of sheetsToTry) {
+    try {
+      const encodedSheet = encodeURIComponent(sheetName);
+      const url = `https://docs.google.com/spreadsheets/d/${sheetId.trim()}/gviz/tq?tqx=out:json&sheet=${encodedSheet}&tq=${encodeURIComponent('select *')}`;
       
-      // Parse dates
-      let startDate = c[5]?.f || '';
-      if (!startDate && c[5]?.v) {
-        const m = String(c[5].v).match(/Date\((\d+),(\d+),(\d+)\)/);
-        if (m) {
-          startDate = `${m[1]}-${String(Number(m[2]) + 1).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+
+      const text = await res.text();
+      const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);/);
+      if (!match) continue;
+
+      const json = JSON.parse(match[1]);
+      if (json.status === 'error') continue;
+
+      const rows = json?.table?.rows;
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+
+      const pMapByName = new Map<string, Personnel>();
+      for (const p of personnelList) {
+        pMapByName.set(`${p.prefix}${p.firstName} ${p.lastName}`.trim(), p);
+        pMapByName.set(`${p.firstName} ${p.lastName}`.trim(), p);
+      }
+
+      const records: LeaveRecord[] = [];
+      const isNewSchema = (sheetName === 'LeaveRequests') || (rows[0]?.c?.length >= 18);
+
+      for (let i = 0; i < rows.length; i++) {
+        const c = rows[i]?.c;
+        if (!c) continue;
+
+        let id = '';
+        let referenceNumber = '';
+        let personnelName = '';
+        let leaveTypeLabel = 'ลาป่วย';
+        let startDate = '';
+        let endDate = '';
+        let totalDays = 1;
+        let reason = '';
+        let substituteName = '';
+        let contactPhone = '';
+        let statusLabel = 'รอความเห็นหัวหน้าวิชาการ';
+        let submittedAt = new Date().toISOString();
+        let academicHeadComment: string | undefined = undefined;
+        let directorComment: string | undefined = undefined;
+
+        if (isNewSchema) {
+          // Schema for LeaveRequests:
+          // 0: ID, 1: Ref, 2: PersonnelId, 3: PersonnelName, 4: Position, 5: LeaveType, 6: FiscalYear, 
+          // 7: StartDate, 8: EndDate, 9: IsHalfDay, 10: HalfDayPeriod, 11: TotalDays, 12: Reason, 
+          // 13: Address, 14: Phone, 15: Substitute, 16: SubmittedAt, 17: Status, 18: AcademicComment, 20: DirectorComment
+          if (!c[1]?.v && !c[0]?.v) continue;
+          id = c[0]?.v ? String(c[0].v).trim() : '';
+          referenceNumber = c[1]?.v ? String(c[1].v).trim() : id;
+          personnelName = c[3]?.v ? String(c[3].v).trim() : '';
+          leaveTypeLabel = c[5]?.v ? String(c[5].v).trim() : 'ลาป่วย';
+          startDate = c[7]?.f || (c[7]?.v ? String(c[7].v) : '');
+          endDate = c[8]?.f || (c[8]?.v ? String(c[8].v) : startDate);
+          totalDays = typeof c[11]?.v === 'number' ? c[11].v : parseFloat(String(c[11]?.v || '1'));
+          reason = c[12]?.v ? String(c[12].v).trim() : '';
+          contactPhone = c[14]?.v ? String(c[14].v).trim() : '';
+          substituteName = c[15]?.v ? String(c[15].v).trim() : '';
+          submittedAt = c[16]?.v ? String(c[16].v) : new Date().toISOString();
+          statusLabel = c[17]?.v ? String(c[17].v).trim() : 'รอความเห็นหัวหน้าวิชาการ';
+          academicHeadComment = c[18]?.v ? String(c[18].v).trim() : undefined;
+          directorComment = c[20]?.v ? String(c[20].v).trim() : undefined;
         } else {
-          startDate = String(c[5].v);
+          // Legacy Schema:
+          // 0: Ref, 1: SubmittedAt, 2: Name, 3: Position, 4: Type, 5: StartDate, 6: EndDate, 7: Days, 
+          // 8: Reason, 9: Substitute, 10: Phone, 11: Status, 12: AcademicComment, 13: DirectorComment
+          if (!c[0]?.v) continue;
+          referenceNumber = String(c[0].v).trim();
+          id = `sheet-${referenceNumber.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          submittedAt = c[1]?.v ? String(c[1].v) : new Date().toISOString();
+          personnelName = c[2]?.v ? String(c[2].v).trim() : '';
+          leaveTypeLabel = c[4]?.v ? String(c[4].v).trim() : 'ลาป่วย';
+          startDate = c[5]?.f || (c[5]?.v ? String(c[5].v) : '');
+          endDate = c[6]?.f || (c[6]?.v ? String(c[6].v) : startDate);
+          totalDays = typeof c[7]?.v === 'number' ? c[7].v : parseFloat(String(c[7]?.v || '1'));
+          reason = c[8]?.v ? String(c[8].v).trim() : '';
+          substituteName = c[9]?.v ? String(c[9].v).trim() : '';
+          contactPhone = c[10]?.v ? String(c[10].v).trim() : '';
+          statusLabel = c[11]?.v ? String(c[11].v).trim() : 'รอความเห็นหัวหน้าวิชาการ';
+          academicHeadComment = c[12]?.v ? String(c[12].v).trim() : undefined;
+          directorComment = c[13]?.v ? String(c[13].v).trim() : undefined;
         }
-      }
 
-      let endDate = c[6]?.f || '';
-      if (!endDate && c[6]?.v) {
-        const m = String(c[6].v).match(/Date\((\d+),(\d+),(\d+)\)/);
-        if (m) {
-          endDate = `${m[1]}-${String(Number(m[2]) + 1).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
-        } else {
-          endDate = String(c[6].v);
+        // Clean dates if formatted like Date(year,month,day)
+        if (startDate.includes('Date(')) {
+          const m = startDate.match(/Date\((\d+),(\d+),(\d+)\)/);
+          if (m) startDate = `${m[1]}-${String(Number(m[2]) + 1).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
         }
+        if (endDate.includes('Date(')) {
+          const m = endDate.match(/Date\((\d+),(\d+),(\d+)\)/);
+          if (m) endDate = `${m[1]}-${String(Number(m[2]) + 1).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+        }
+
+        let matchedPersonnel = pMapByName.get(personnelName);
+        if (!matchedPersonnel) {
+          matchedPersonnel = personnelList.find(p => personnelName.includes(p.firstName));
+        }
+        const personnelId = matchedPersonnel ? matchedPersonnel.id : 'p-007';
+
+        let subPersonnelId: string | undefined = undefined;
+        if (substituteName && substituteName !== '-') {
+          const subP = pMapByName.get(substituteName) || personnelList.find(p => substituteName.includes(p.firstName));
+          if (subP) subPersonnelId = subP.id;
+        }
+
+        let leaveType: LeaveType = 'sick';
+        if (leaveTypeLabel.includes('กิจ') || leaveTypeLabel.includes('พักผ่อน')) leaveType = 'personal';
+        else if (leaveTypeLabel.includes('คลอด')) leaveType = 'maternity';
+        else if (leaveTypeLabel.includes('ช่วยภริยา') || leaveTypeLabel.includes('ภริยา')) leaveType = 'wife_delivery';
+        else if (leaveTypeLabel.includes('ทหาร')) leaveType = 'military';
+        else if (leaveTypeLabel.includes('อุปสมบท')) leaveType = 'ordination';
+        else if (leaveTypeLabel.includes('อื่น') || leaveTypeLabel.includes('อบรม')) leaveType = 'other';
+
+        let status: LeaveStatus = 'pending_academic';
+        if (statusLabel.includes('อนุมัติแล้ว')) status = 'approved';
+        else if (statusLabel.includes('ไม่อนุมัติ')) status = 'rejected';
+        else if (statusLabel.includes('ยกเลิก')) status = 'cancelled';
+        else if (statusLabel.includes('รอ ผอ') || statusLabel.includes('เสนอ ผอ')) status = 'pending_director';
+
+        const fyMatch = referenceNumber.match(/\/(\d{4})/);
+        const fiscalYear = fyMatch ? parseInt(fyMatch[1], 10) : 2570;
+
+        records.push({
+          id: id || `sheet-${referenceNumber.replace(/[^a-zA-Z0-9]/g, '_')}`,
+          referenceNumber,
+          personnelId,
+          leaveType,
+          fiscalYear,
+          startDate,
+          endDate,
+          totalDays,
+          reason,
+          contactAddress: '',
+          contactPhone,
+          substitutePersonnelId: subPersonnelId,
+          status,
+          submittedAt,
+          applicantSignature: matchedPersonnel?.signatureUrl || createDefaultSignatureSvg(personnelName || 'ผู้ขอลา'),
+          academicHeadComment,
+          directorComment
+        });
       }
 
-      const totalDays = typeof c[7]?.v === 'number' ? c[7].v : parseFloat(String(c[7]?.v || '1'));
-      const reason = c[8]?.v ? String(c[8].v).trim() : '';
-      const substituteName = c[9]?.v ? String(c[9].v).trim() : '';
-      const contactPhone = c[10]?.v ? String(c[10].v).trim() : '';
-      const statusLabel = c[11]?.v ? String(c[11].v).trim() : 'รอความเห็นหัวหน้าวิชาการ';
-      const academicHeadComment = c[12]?.v ? String(c[12].v).trim() : undefined;
-      const directorComment = c[13]?.v ? String(c[13].v).trim() : undefined;
-
-      // Find personnel
-      let matchedPersonnel = pMapByName.get(personnelName);
-      if (!matchedPersonnel) {
-        matchedPersonnel = personnelList.find(p => personnelName.includes(p.firstName));
+      if (records.length > 0) {
+        return records;
       }
-      const personnelId = matchedPersonnel ? matchedPersonnel.id : 'p-007';
-
-      // Find substitute personnel
-      let subPersonnelId: string | undefined = undefined;
-      if (substituteName && substituteName !== '-') {
-        const subP = pMapByName.get(substituteName) || personnelList.find(p => substituteName.includes(p.firstName));
-        if (subP) subPersonnelId = subP.id;
-      }
-
-      // Map leave type
-      let leaveType: LeaveType = 'sick';
-      if (leaveTypeLabel.includes('กิจ') || leaveTypeLabel.includes('พักผ่อน')) leaveType = 'personal';
-      else if (leaveTypeLabel.includes('คลอด')) leaveType = 'maternity';
-      else if (leaveTypeLabel.includes('ช่วยภริยา') || leaveTypeLabel.includes('ภริยา')) leaveType = 'wife_delivery';
-      else if (leaveTypeLabel.includes('ทหาร')) leaveType = 'military';
-      else if (leaveTypeLabel.includes('อุปสมบท')) leaveType = 'ordination';
-      else if (leaveTypeLabel.includes('อื่น') || leaveTypeLabel.includes('อบรม')) leaveType = 'other';
-
-      // Map status
-      let status: LeaveStatus = 'pending_academic';
-      if (statusLabel.includes('อนุมัติแล้ว')) status = 'approved';
-      else if (statusLabel.includes('ไม่อนุมัติ')) status = 'rejected';
-      else if (statusLabel.includes('ยกเลิก')) status = 'cancelled';
-      else if (statusLabel.includes('รอ ผอ') || statusLabel.includes('เสนอ ผอ')) status = 'pending_director';
-
-      // Fiscal year
-      const fyMatch = referenceNumber.match(/\/(\d{4})/);
-      const fiscalYear = fyMatch ? parseInt(fyMatch[1], 10) : 2568;
-
-      records.push({
-        id: `sheet-${referenceNumber.replace(/[^a-zA-Z0-9]/g, '_')}`,
-        referenceNumber,
-        personnelId,
-        leaveType,
-        fiscalYear,
-        startDate,
-        endDate,
-        totalDays,
-        reason,
-        contactAddress: '',
-        contactPhone,
-        substitutePersonnelId: subPersonnelId,
-        status,
-        submittedAt,
-        applicantSignature: matchedPersonnel?.signatureUrl || createDefaultSignatureSvg(personnelName || 'ผู้ขอลา'),
-        academicHeadComment,
-        directorComment
-      });
+    } catch {
+      // try next sheet
     }
-
-    return records;
-  } catch (err) {
-    console.warn('Failed to fetch records from Google Sheets:', err);
-    return null;
   }
+
+  return null;
 };
 
 // Merge local records and sheet records cleanly (unifies all devices, never loses records)
@@ -1189,9 +1313,30 @@ export const fetchDatabaseFromGoogleWebApp = async (webhookUrl: string): Promise
     return { success: false, message: 'กรุณาระบุ URL ของ Google Apps Script ที่ถูกต้อง' };
   }
 
+  const targetUrl = `${webhookUrl.trim()}${webhookUrl.includes('?') ? '&' : '?'}action=getAll`;
+
+  // 1. Try server proxy first (bypasses browser CORS)
   try {
-    const url = `${webhookUrl.trim()}${webhookUrl.includes('?') ? '&' : '?'}action=getAll`;
-    const res = await fetch(url);
+    const proxyRes = await fetch(`/api/cloud-fetch?url=${encodeURIComponent(targetUrl)}`);
+    if (proxyRes.ok) {
+      const { isJson, data } = await parseJsonResponseSafe(proxyRes);
+      if (isJson && data) {
+        const payloadData = data.data || data;
+        if (payloadData && payloadData.status === 'success' && payloadData.tables) {
+          return {
+            success: true,
+            tables: payloadData.tables
+          };
+        }
+      }
+    }
+  } catch {
+    // proxy not available, proceed to direct fetch
+  }
+
+  // 2. Direct fetch fallback
+  try {
+    const res = await fetch(targetUrl, { redirect: 'follow' });
     if (!res.ok) {
       return { success: false, message: `เซิร์ฟเวอร์ตอบกลับรหัส: ${res.status}` };
     }
@@ -1207,6 +1352,143 @@ export const fetchDatabaseFromGoogleWebApp = async (webhookUrl: string): Promise
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, message: `เกิดข้อผิดพลาดในการดึงข้อมูล: ${msg}` };
   }
+};
+
+// Parse LeaveRecords from 8-table Google Apps Script result
+export const parseLeaveRecordsFromWebAppTables = (
+  tables: Record<string, { count: number; data: any[] }>,
+  personnelList: Personnel[]
+): LeaveRecord[] => {
+  const sheet = tables.LeaveRequests || tables.leaveRequests;
+  if (!sheet || !Array.isArray(sheet.data) || sheet.data.length === 0) {
+    return [];
+  }
+
+  const pMapById = new Map(personnelList.map(p => [p.id, p]));
+  const pMapByName = new Map(personnelList.map(p => [`${p.prefix}${p.firstName} ${p.lastName}`, p]));
+
+  const records: LeaveRecord[] = [];
+
+  for (const row of sheet.data) {
+    if (!row) continue;
+    const id = String(row['ID'] || row['id'] || '').trim();
+    const referenceNumber = String(row['เลขที่คำขอ'] || row['referenceNumber'] || id).trim();
+    if (!id && !referenceNumber) continue;
+
+    const personnelId = String(row['รหัสบุคลากร'] || row['personnelId'] || '').trim();
+    const personnelName = String(row['ชื่อผู้ขอลา'] || row['personnelName'] || '').trim();
+    const leaveTypeLabel = String(row['ประเภทการลา'] || row['leaveType'] || 'ลาป่วย').trim();
+    const fiscalYear = Number(row['ปีงบประมาณ'] || row['fiscalYear'] || 2570);
+    const startDate = String(row['ตั้งแต่วันที่'] || row['startDate'] || '').trim();
+    const endDate = String(row['ถึงวันที่'] || row['endDate'] || startDate).trim();
+    const isHalfDay = String(row['ลาครึ่งวัน'] || '').includes('ใช่') || Boolean(row['isHalfDay']);
+    const halfDayPeriod = (row['ช่วงเวลาครึ่งวัน'] === 'บ่าย' || row['halfDayPeriod'] === 'afternoon') ? 'afternoon' : 'morning';
+    const totalDays = typeof row['จำนวนวันทำการ'] === 'number' 
+      ? row['จำนวนวันทำการ'] 
+      : (parseFloat(String(row['จำนวนวันทำการ'] || row['totalDays'] || '1')) || 1);
+    const reason = String(row['เหตุผลการลา'] || row['reason'] || '').trim();
+    const contactAddress = String(row['สถานที่ติดต่อ'] || row['contactAddress'] || '').trim();
+    const contactPhone = String(row['เบอร์โทรติดต่อ'] || row['contactPhone'] || '').trim();
+    const substituteName = String(row['ผู้ปฏิบัติหน้าที่แทน'] || row['substituteName'] || '').trim();
+    const submittedAt = String(row['วันที่ยื่นคำขอ'] || row['submittedAt'] || new Date().toISOString()).trim();
+    const statusLabel = String(row['สถานะ'] || row['status'] || 'รอความเห็นหัวหน้าวิชาการ').trim();
+    const academicHeadComment = row['ความเห็นหัวหน้าวิชาการ'] || row['academicHeadComment'] || undefined;
+    const academicHeadActionDate = row['วันที่ตรวจวิชาการ'] || row['academicHeadActionDate'] || undefined;
+    const directorComment = row['คำสั่งผู้อำนวยการ'] || row['directorComment'] || undefined;
+    const directorActionDate = row['วันที่สั่งการ'] || row['directorActionDate'] || undefined;
+    const cancellationReason = row['เหตุผลยกเลิก'] || row['cancellationReason'] || undefined;
+
+    let matchedP = pMapById.get(personnelId);
+    if (!matchedP && personnelName) {
+      matchedP = pMapByName.get(personnelName) || personnelList.find(p => personnelName.includes(p.firstName));
+    }
+    const finalPersonnelId = matchedP ? matchedP.id : (personnelId || 'p-004');
+
+    let subId: string | undefined = undefined;
+    if (substituteName && substituteName !== '-') {
+      const subP = pMapByName.get(substituteName) || personnelList.find(p => substituteName.includes(p.firstName));
+      if (subP) subId = subP.id;
+    }
+
+    let leaveType: LeaveType = 'sick';
+    if (leaveTypeLabel.includes('กิจ') || leaveTypeLabel.includes('พักผ่อน')) leaveType = 'personal';
+    else if (leaveTypeLabel.includes('คลอด')) leaveType = 'maternity';
+    else if (leaveTypeLabel.includes('ช่วยภริยา') || leaveTypeLabel.includes('ภริยา')) leaveType = 'wife_delivery';
+    else if (leaveTypeLabel.includes('ทหาร')) leaveType = 'military';
+    else if (leaveTypeLabel.includes('อุปสมบท')) leaveType = 'ordination';
+    else if (leaveTypeLabel.includes('อื่น') || leaveTypeLabel.includes('อบรม')) leaveType = 'other';
+
+    let status: LeaveStatus = 'pending_academic';
+    if (statusLabel.includes('อนุมัติแล้ว')) status = 'approved';
+    else if (statusLabel.includes('ไม่อนุมัติ')) status = 'rejected';
+    else if (statusLabel.includes('ยกเลิก')) status = 'cancelled';
+    else if (statusLabel.includes('รอ ผอ') || statusLabel.includes('เสนอ ผอ')) status = 'pending_director';
+
+    records.push({
+      id: id || `sheet-${referenceNumber.replace(/[^a-zA-Z0-9]/g, '_')}`,
+      referenceNumber,
+      personnelId: finalPersonnelId,
+      leaveType,
+      fiscalYear,
+      startDate,
+      endDate,
+      isHalfDay,
+      halfDayPeriod,
+      totalDays,
+      reason,
+      contactAddress,
+      contactPhone,
+      substitutePersonnelId: subId,
+      status,
+      submittedAt,
+      applicantSignature: matchedP?.signatureUrl || createDefaultSignatureSvg(personnelName || 'ผู้ขอลา'),
+      academicHeadComment,
+      academicHeadActionDate,
+      directorComment,
+      directorActionDate,
+      cancellationReason
+    });
+  }
+
+  return records;
+};
+
+// Automatically record web access and sync with Google Sheets on website open
+export const recordWebsiteAccessAndSync = async (
+  currentPersonnel: Personnel | null,
+  records: LeaveRecord[],
+  personnelList: Personnel[],
+  settings: SchoolSettings
+): Promise<{ success: boolean; log: AuditLog }> => {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const actorName = currentPersonnel 
+    ? `${currentPersonnel.prefix}${currentPersonnel.firstName} ${currentPersonnel.lastName}` 
+    : 'ผู้เข้าใช้งานระบบ';
+  const actorRole = currentPersonnel?.role || 'teacher';
+  const action = 'เข้าใช้งานระบบเว็บแอพ (เปิดเว็บ)';
+  const details = `เข้าใช้งานระบบจัดการวันลา ดึงข้อมูลและบันทึกลง Google Sheets อัตโนมัติ (เวลา ${timeStr})`;
+
+  // Add to local audit logs
+  const updatedLogs = addAuditLog(actorName, actorRole, action, details);
+  const accessLog = updatedLogs[0];
+
+  // If webhook is available and autoSync is true, sync with Google Sheets (8 Tables + Logs)
+  if (settings.googleSheetsWebhookUrl && settings.isAutoSyncEnabled !== false) {
+    try {
+      await syncWithGoogleSheets(
+        settings.googleSheetsWebhookUrl,
+        records,
+        personnelList,
+        settings
+      );
+    } catch {
+      // background sync handled gracefully
+    }
+  }
+
+  return { success: true, log: accessLog };
 };
 
 // Sync with Google Sheets 8 Tables via Server Proxy or Direct Fallback (avoids CORS)

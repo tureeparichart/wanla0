@@ -105,7 +105,7 @@ async function startServer() {
     }
   });
 
-  // 3. Cloud Sync Proxy (Google Sheets)
+  // 3. Cloud Sync Proxy (Google Sheets POST)
   // Calls external cloud webhook endpoints from the server side to bypass browser CORS
   app.post('/api/cloud-sync', async (req, res) => {
     const { url, serviceType, payload } = req.body;
@@ -149,6 +149,48 @@ async function startServer() {
       return res.status(500).json({
         success: false,
         message: `ไม่สามารถเชื่อมต่อคลาวด์ ${serviceType || ''}: ${errorMsg}`
+      });
+    }
+  });
+
+  // 3.1 Cloud Fetch Proxy (Google Sheets GET)
+  // Fetches data from Google Apps Script Web App or Google Sheets server-side to bypass browser CORS
+  app.get('/api/cloud-fetch', async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.startsWith('http')) {
+      return res.status(400).json({
+        success: false,
+        message: 'กรุณาระบุ URL ที่ถูกต้อง (ขึ้นต้นด้วย http:// หรือ https://)'
+      });
+    }
+
+    try {
+      const cloudRes = await fetch(targetUrl.trim(), {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'Accept': 'application/json, text/plain, */*'
+        }
+      });
+
+      const responseText = await cloudRes.text();
+      let responseJson: any = null;
+      try {
+        responseJson = JSON.parse(responseText);
+      } catch {
+        // text response
+      }
+
+      return res.json({
+        success: cloudRes.ok || Boolean(responseJson && responseJson.status === 'success'),
+        status: cloudRes.status,
+        data: responseJson || responseText
+      });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        message: `ไม่สามารถดึงข้อมูลจาก Google Sheets ผ่านพร็อกซี: ${errorMsg}`
       });
     }
   });

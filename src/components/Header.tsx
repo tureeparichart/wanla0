@@ -17,7 +17,8 @@ import {
   Menu,
   Sheet,
   FolderOpen,
-  ExternalLink
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 import { formatThaiDate } from '../services/storageService';
 import { Avatar } from './Avatar';
@@ -36,6 +37,9 @@ interface HeaderProps {
   onNavigateTab: (tab: string) => void;
   onOpenLoginModal?: () => void;
   onOpenMobileDrawer?: () => void;
+  lastSyncTime?: string | null;
+  isSyncingSheet?: boolean;
+  onRefreshSheet?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -51,6 +55,9 @@ export const Header: React.FC<HeaderProps> = ({
   onNavigateTab,
   onOpenLoginModal,
   onOpenMobileDrawer,
+  lastSyncTime,
+  isSyncingSheet,
+  onRefreshSheet,
 }) => {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
@@ -265,18 +272,38 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right: Cloud Sync, Notifications, Executive Mode */}
         <div className="flex items-center gap-2">
-          {/* Cloud Sync Button */}
-          {onOpenGoogleSheets && (
-            <button
-              onClick={onOpenGoogleSheets}
-              className="flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors shadow-2xs"
-              title="ตั้งค่าและซิงค์ข้อมูล Google Sheets ทันที"
-            >
-              <Cloud className="w-3.5 h-3.5 text-emerald-600" />
-              <span className="hidden sm:inline">ซิงค์คลาวด์</span>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-            </button>
-          )}
+          {/* Cloud Sync Status & Quick Pull from Google Sheets */}
+          <div className="flex items-center gap-1.5">
+            {onRefreshSheet && (
+              <button
+                onClick={onRefreshSheet}
+                disabled={isSyncingSheet}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer shadow-2xs ${
+                  isSyncingSheet
+                    ? 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-300'
+                }`}
+                title="กดเพื่อดึงข้อมูลล่าสุดจาก Google Sheets และบันทึกประวัติการเข้าใช้งานทันที"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin text-amber-600' : 'text-slate-500'}`} />
+                <span className="hidden sm:inline">
+                  {isSyncingSheet ? 'กำลังดึงข้อมูล Sheet...' : (lastSyncTime ? `ซิงค์ Sheet ${lastSyncTime}` : 'ดึงข้อมูล Sheet')}
+                </span>
+              </button>
+            )}
+
+            {onOpenGoogleSheets && (
+              <button
+                onClick={onOpenGoogleSheets}
+                className="flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors shadow-2xs"
+                title="จัดการฐานข้อมูล 8 ตาราง Google Sheets และ LINE API"
+              >
+                <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="hidden sm:inline">ฐานข้อมูลคลาวด์</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+              </button>
+            )}
+          </div>
 
           {/* Notification Badge if Pending Approvals */}
           {totalPending > 0 && (

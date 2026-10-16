@@ -26,6 +26,9 @@ import {
   fetchDatabaseFromServer,
   syncDatabaseToServer,
   fetchRecordsFromGoogleSheets,
+  fetchDatabaseFromGoogleWebApp,
+  parseLeaveRecordsFromWebAppTables,
+  recordWebsiteAccessAndSync,
   mergeLeaveRecords,
   sendLineNotification,
   formatNewLeaveLineMessage,
@@ -83,6 +86,12 @@ export default function App() {
   const [isGoogleSheetsOpen, setIsGoogleSheetsOpen] = useState<boolean>(false);
   const [isLineModalOpen, setIsLineModalOpen] = useState<boolean>(false);
 
+  // 5. Google Sheets Synchronization & Auto-record State
+  const [lastGoogleSheetSync, setLastGoogleSheetSync] = useState<string | null>(null);
+  const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
+  const [sheetSyncToast, setSheetSyncToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const hasAutoLoggedAccess = React.useRef<boolean>(false);
+
   // Current logged in personnel object
   const currentPersonnel = personnelList.find(p => p.id === currentPersonnelId) || personnelList[0];
 
@@ -95,6 +104,16 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [welcomeToast]);
+
+  // Auto-dismiss Google Sheets sync toast
+  useEffect(() => {
+    if (sheetSyncToast) {
+      const timer = setTimeout(() => {
+        setSheetSyncToast(null);
+      }, 4500);
+      return () => clearTimeout(timer);
+    }
+  }, [sheetSyncToast]);
 
   // Save changes to localStorage
   useEffect(() => {
@@ -136,63 +155,110 @@ export default function App() {
     }
   };
 
-  // Cross-device synchronization on load & polling (unifies data from all devices via Google Sheets)
-  useEffect(() => {
-    let isMounted = true;
+  // Cross-device synchronization: Fetch from Google Sheets on load & automatically record access
+  const loadAndSyncCentralData = async (isInitialAccess: boolean = false) => {
+    setIsSyncingSheet(true);
+    let currentRecs = leaveRecords;
+    let currentPers = personnelList;
+    let currentSett = settings;
+    let pulledFromSheetCount = 0;
 
-    const loadCentralData = async () => {
-      let currentRecs = leaveRecords;
+    // 1. Try server database first if running full-stack
+    try {
+      const serverData = await fetchDatabaseFromServer();
+      if (serverData) {
+        if (serverData.leaveRecords && serverData.leaveRecords.length > 0) {
+          currentRecs = serverData.leaveRecords;
+          setLeaveRecords(serverData.leaveRecords);
+          saveLeaveRecords(serverData.leaveRecords);
+        }
+        if (serverData.personnelList) {
+          currentPers = serverData.personnelList;
+          setPersonnelList(serverData.personnelList);
+          savePersonnel(serverData.personnelList);
+        }
+        if (serverData.settings) {
+          currentSett = serverData.settings;
+          setSettings(serverData.settings);
+          saveSchoolSettings(serverData.settings);
+        }
+        if (serverData.auditLogs) {
+          setAuditLogs(serverData.auditLogs);
+        }
+      }
+    } catch {
+      // server-side not available (static hosting)
+    }
 
-      // 1. Try server database first if running full-stack
+    // 2. Pull 8 tables from Google Apps Script Web App
+    if (currentSett.googleSheetsWebhookUrl) {
       try {
-        const serverData = await fetchDatabaseFromServer();
-        if (serverData && isMounted) {
-          if (serverData.leaveRecords && serverData.leaveRecords.length > 0) {
-            currentRecs = serverData.leaveRecords;
-            setLeaveRecords(serverData.leaveRecords);
-            saveLeaveRecords(serverData.leaveRecords);
-          }
-          if (serverData.personnelList) {
-            setPersonnelList(serverData.personnelList);
-            savePersonnel(serverData.personnelList);
-          }
-          if (serverData.settings) {
-            setSettings(serverData.settings);
-            saveSchoolSettings(serverData.settings);
-          }
-          if (serverData.auditLogs) {
-            setAuditLogs(serverData.auditLogs);
+        const webAppRes = await fetchDatabaseFromGoogleWebApp(currentSett.googleSheetsWebhookUrl);
+        if (webAppRes.success && webAppRes.tables) {
+          const parsedFromWebApp = parseLeaveRecordsFromWebAppTables(webAppRes.tables, currentPers);
+          if (parsedFromWebApp.length > 0) {
+            pulledFromSheetCount += parsedFromWebApp.length;
+            currentRecs = mergeLeaveRecords(currentRecs, parsedFromWebApp);
+            setLeaveRecords(currentRecs);
+            saveLeaveRecords(currentRecs);
           }
         }
       } catch {
-        // server-side not available (static hosting)
+        // web app fetch handled gracefully
       }
+    }
 
-      // 2. Fetch unified records from Google Sheets (source of truth for all devices)
-      if (settings.googleSheetId) {
-        try {
-          const sheetRecords = await fetchRecordsFromGoogleSheets(settings.googleSheetId, personnelList);
-          if (sheetRecords && sheetRecords.length > 0 && isMounted) {
-            const merged = mergeLeaveRecords(currentRecs, sheetRecords);
-            setLeaveRecords(merged);
-            saveLeaveRecords(merged);
-          }
-        } catch {
-          // ignore network hiccups
+    // 3. Pull from Google Sheet Visualization API (Spreadsheet ID)
+    if (currentSett.googleSheetId) {
+      try {
+        const sheetRecords = await fetchRecordsFromGoogleSheets(currentSett.googleSheetId, currentPers);
+        if (sheetRecords && sheetRecords.length > 0) {
+          pulledFromSheetCount += sheetRecords.length;
+          currentRecs = mergeLeaveRecords(currentRecs, sheetRecords);
+          setLeaveRecords(currentRecs);
+          saveLeaveRecords(currentRecs);
         }
+      } catch {
+        // ignore network hiccups
       }
-    };
+    }
 
-    loadCentralData();
+    const timeStr = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setLastGoogleSheetSync(timeStr);
 
-    // Background poll every 12 seconds to synchronize changes across all devices (mobile, tablet, PC)
-    const interval = setInterval(async () => {
+    // 4. Record access into Google Sheets automatically on website entry
+    if (isInitialAccess && !hasAutoLoggedAccess.current) {
+      hasAutoLoggedAccess.current = true;
+      try {
+        await recordWebsiteAccessAndSync(currentPersonnel, currentRecs, currentPers, currentSett);
+        setSheetSyncToast({
+          message: `ดึงข้อมูลล่าสุดจาก Google Sheets และบันทึกประวัติการเข้าใช้งานลง Sheet เรียบร้อยแล้ว (อัปเดต ${timeStr})`,
+          type: 'success'
+        });
+      } catch {
+        // background access log failure handled gracefully
+      }
+    }
+
+    setIsSyncingSheet(false);
+    return { recordsCount: currentRecs.length, pulledCount: pulledFromSheetCount };
+  };
+
+  // Run on mount (when opening the web)
+  useEffect(() => {
+    let isMounted = true;
+
+    // Initial load and record access to Google Sheets
+    loadAndSyncCentralData(true);
+
+    // Background poll every 15 seconds to synchronize changes across all devices
+    const interval = setInterval(() => {
       if (!isMounted) return;
-      await loadCentralData();
-    }, 12000);
+      loadAndSyncCentralData(false);
+    }, 15000);
 
     const handleFocus = () => {
-      loadCentralData();
+      loadAndSyncCentralData(false);
     };
     window.addEventListener('focus', handleFocus);
 
@@ -201,7 +267,16 @@ export default function App() {
       clearInterval(interval);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [settings.googleSheetId]);
+  }, [settings.googleSheetId, settings.googleSheetsWebhookUrl]);
+
+  // Manual trigger to pull data from Google Sheets immediately
+  const handleManualRefreshGoogleSheets = async () => {
+    const res = await loadAndSyncCentralData(false);
+    setSheetSyncToast({
+      message: `ดึงข้อมูลจาก Google Sheets สำเร็จ (${res.recordsCount} คำขอลาในระบบ)`,
+      type: 'success'
+    });
+  };
 
   // SPA module switching with PIN 1234 protection for Approvals and Organization Settings
   const handleSelectTab = (tabId: string) => {
@@ -520,7 +595,36 @@ export default function App() {
           onNavigateTab={handleSelectTab}
           onOpenLoginModal={() => setIsLoginModalOpen(true)}
           onOpenMobileDrawer={() => setIsMobileDrawerOpen(true)}
+          lastSyncTime={lastGoogleSheetSync}
+          isSyncingSheet={isSyncingSheet}
+          onRefreshSheet={handleManualRefreshGoogleSheets}
         />
+
+        {/* Automatic Google Sheets Sync Status Notification Banner */}
+        {sheetSyncToast && (
+          <div className="mx-3 sm:mx-6 mt-3 animate-in fade-in slide-in-from-top-2 duration-300">
+            <div className={`p-3 sm:p-4 rounded-2xl flex items-center justify-between gap-3 text-xs sm:text-sm font-medium border shadow-xs ${
+              sheetSyncToast.type === 'success'
+                ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                : sheetSyncToast.type === 'error'
+                  ? 'bg-rose-50 text-rose-900 border-rose-300'
+                  : 'bg-blue-50 text-blue-900 border-blue-300'
+            }`}>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                  sheetSyncToast.type === 'success' ? 'bg-emerald-500 animate-pulse' : 'bg-blue-500'
+                }`} />
+                <span className="font-medium">{sheetSyncToast.message}</span>
+              </div>
+              <button
+                onClick={() => setSheetSyncToast(null)}
+                className="text-slate-500 hover:text-slate-800 text-xs px-2.5 py-1 rounded-lg hover:bg-black/5 cursor-pointer font-medium"
+              >
+                ปิด
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 3. Main Single Page Application Content Body */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-5 sm:py-7">
@@ -690,6 +794,7 @@ export default function App() {
         leaveRecords={leaveRecords}
         allPersonnel={personnelList}
         onTriggerSyncAll={() => syncAllData(leaveRecords, personnelList, settings, auditLogs)}
+        onPullFromSheet={handleManualRefreshGoogleSheets}
       />
 
       {/* LINE Messaging API School Group Notification Modal */}

@@ -44,6 +44,7 @@ interface GoogleSheetsModalProps {
   leaveRecords: LeaveRecord[];
   allPersonnel: Personnel[];
   onTriggerSyncAll?: () => Promise<void>;
+  onPullFromSheet?: () => Promise<any>;
 }
 
 export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
@@ -54,11 +55,13 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
   leaveRecords,
   allPersonnel,
   onTriggerSyncAll,
+  onPullFromSheet,
 }) => {
   const [sheetsUrl, setSheetsUrl] = useState(settings.googleSheetsWebhookUrl || '');
   const [autoSync, setAutoSync] = useState(settings.isAutoSyncEnabled !== false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
   const [isTestingLine, setIsTestingLine] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -189,6 +192,32 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
       setSyncStatus({ type: 'error', message: `ข้อผิดพลาด: ${errorMsg}` });
     } finally {
       setIsTestingLine(false);
+    }
+  };
+
+  // Pull latest records from Google Sheets into the web app
+  const handlePullFromSheet = async () => {
+    setIsPulling(true);
+    setSyncStatus(null);
+    try {
+      if (onPullFromSheet) {
+        await onPullFromSheet();
+        setSyncStatus({
+          type: 'success',
+          message: 'ดึงข้อมูลล่าสุดจาก Google Sheets มาแสดงผลเรียบร้อยแล้ว'
+        });
+      } else if (onTriggerSyncAll) {
+        await onTriggerSyncAll();
+        setSyncStatus({
+          type: 'success',
+          message: 'ดึงข้อมูลล่าสุดจาก Google Sheets มาแสดงผลเรียบร้อยแล้ว'
+        });
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      setSyncStatus({ type: 'error', message: `เกิดข้อผิดพลาดในการดึงข้อมูล: ${errorMsg}` });
+    } finally {
+      setIsPulling(false);
     }
   };
 
@@ -326,6 +355,26 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
           {/* Action Buttons */}
           <div className="flex flex-wrap justify-end gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={handlePullFromSheet}
+              disabled={isPulling || isSyncing}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-xs transition-all cursor-pointer disabled:opacity-50"
+              title="ดึงข้อมูลคำขอลาและฐานข้อมูลกลางจาก Google Sheets มาแสดงผลเดี๋ยวนี้"
+            >
+              {isPulling ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  กำลังดึงข้อมูลจาก Sheet...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  ดึงข้อมูลล่าสุดจาก Google Sheets
+                </>
+              )}
+            </button>
+
             <button
               type="button"
               onClick={handleTestLineNotify}
